@@ -1,41 +1,46 @@
+# chat/middleware.py
+from urllib.parse import parse_qs
 from channels.db import database_sync_to_async
 from django.contrib.auth.models import AnonymousUser
-from rest_framework_simplejwt.tokens import AccessToken
-from django.contrib.auth.models import User
 
 @database_sync_to_async
-def get_user(token):
-    print(f"Validating token: {token[:20]}...")  # Debug
+def get_user(token_key):
     try:
-        access_token = AccessToken(token)
-        user_id = access_token['user_id']
-        print(f"Token payload: {access_token.payload}")
-        user = User.objects.get(id=user_id)
-        print(f"User found: {user.username} (ID: {user_id})")
+        from rest_framework_simplejwt.tokens import AccessToken
+        from django.contrib.auth import get_user_model
+
+        User = get_user_model()
+        access_token = AccessToken(token_key)
+        user = User.objects.get(id=access_token['user_id'])
         return user
-    except AccessToken.InvalidToken as e:
-        print(f"Invalid token error: {e}")
-        return AnonymousUser()
-    except User.DoesNotExist:
-        print(f"User not found for user_id: {user_id}")
-        return AnonymousUser()
-    except Exception as e:
-        print(f"Unexpected error: {e}")
+    except Exception:
         return AnonymousUser()
 
-class TokenAuthMiddleware:
-    def __init__(self, app):
-        self.app = app
+# chat/middleware.py
+import logging
+logger = logging.getLogger(__name__)
+
+class JWTAuthMiddleware:
+    def __init__(self, inner):
+        self.inner = inner
 
     async def __call__(self, scope, receive, send):
-        query_string = scope.get('query_string', b'').decode()
-        print(f"Query string: {query_string}")
-        token = None
-        for param in query_string.split('&'):
-            if param.startswith('token='):
-                token = param[len('token='):]
-                break
-        if not token:
-            print("No token provided")
-        scope['user'] = await get_user(token) if token else AnonymousUser()
-        return await self.app(scope, receive, send)
+        from urllib.parse import parse_qs
+        from django.contrib.auth.models import AnonymousUser
+
+        query_string = parse_qs(scope["query_string"].decode())
+        token = query_string.get("token", [None])[0]
+
+        if token:
+            logger.info(f"🔑 WebSocket token received: {token[:20]}...")  # first 20 chars only
+            scope["user"] = await get_user(token)
+            logger.info(f"👤 WebSocket user: {scope['user']}")
+        else:
+            logger.warning("❌ No token provided in WebSocket URL")
+            scope["user"] = AnonymousUser()
+
+        return await self.inner(scope, receive, send)
+    
+def JWTAuthMiddlewareStack(inner):
+    from channels.auth import AuthMiddlewareStack
+    return JWTAuthMiddleware(AuthMiddlewareStack(inner))
