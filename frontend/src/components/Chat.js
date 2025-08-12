@@ -208,12 +208,16 @@ const Chat = () => {
 
   // When closing Call component, cleanup state and unregister handler
   const closeCall = (duration = 0) => {
+    console.log("Close CALL======>");
+    
     setShowCall(false);
     setIsInitiator(false);
     setCallerInfo(null);
     setCallType(null);
     handleWebRTCSignalRef.current = null;
+    signalQueueRef.current = []; // Clear signal queue
     if (duration > 0) {
+      console.log('Setting call duration and showing call info:', duration);
       setCallDuration(duration);
       setShowCallInfo(true);
     }

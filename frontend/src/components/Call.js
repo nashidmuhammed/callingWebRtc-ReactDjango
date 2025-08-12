@@ -69,6 +69,11 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
         console.log('Signal not intended for this peer; discarding');
         return;
       }
+      // Check if the signal is intended for this peer
+      // if (data.receiver_id && parseInt(data.receiver_id, 10) !== myId) {
+      //   console.log('Signal not intended for this peer; discarding');
+      //   // return;
+      // }
       if (signal.type === 'offer') {
         console.log('Call: incoming offer received');
         setIncomingOffer(signal);
@@ -122,21 +127,10 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
         return;
       }
 
-      // if (signal.type === 'call-accepted') {
-      //   console.log('Call: call-accepted received');
-      //   if (isInitiator && timeoutRef.current && !isConnected) {
-      //     clearTimeout(timeoutRef.current);
-      //     timeoutRef.current = setTimeout(() => {
-      //       if (!hasReceivedAnswer && !isConnected) {
-      //         alert('Call timed out - no media response');
-      //         cleanupAndClose();
-      //       }
-      //     }, 60000);
-      //   }
-      //   return;
-      // }
       if (signal.type === 'call-accepted') {
         console.log('Call: call-accepted received');
+        console.log('isInitiator===>',isInitiator);
+        
         if (isInitiator) {
           if (!pcRef.current) {
             console.warn('No peer connection; initializing');
@@ -162,8 +156,10 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
         return;
       }
       if (signal.type === 'call-ended') {
+        console.log('Ending call with duration:', duration);
         alert('Call ended by remote user');
-        cleanupAndClose();
+        // cleanupAndClose();
+        cleanupAndClose(signal.duration || 0); // Pass remote duration as fallback
         return;
       }
       if (signal.type === 'call-busy') {
@@ -177,8 +173,9 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
 
     return () => {
       setSignalHandler(() => null);
+      candidateQueueRef.current = []; // Clear candidate queue on unmount
     };
-  }, [setSignalHandler, myId, receiverId]);
+  }, [setSignalHandler, myId, receiverId, isInitiator, hasReceivedAnswer, isConnected]);
 
   const createPeerAndAttachStream = (localStream) => {
     if (pcRef.current) {
@@ -204,17 +201,31 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
 
     pcRef.current.oniceconnectionstatechange = () => {
       const state = pcRef.current.iceConnectionState;
-      console.log('ICE state:', state);
+      console.log('ICE state:', state, 'isInitiator:', isInitiator, 'isConnected:', isConnected, 'duration:', duration);
       if (state === 'connected') {
         setIsConnected(true);
-        // Clear the timeout since the call is now connected
         if (timeoutRef.current) {
           clearTimeout(timeoutRef.current);
-          timeoutRef.current = null; // Reset to avoid accidental reuse
+          timeoutRef.current = null;
         }
-        timerRef.current = setInterval(() => setDuration((prev) => prev + 1), 1000);
+        if (!timerRef.current) {
+          console.log('Starting duration timer');
+          timerRef.current = setInterval(() => {
+            setDuration((prev) => {
+              // console.log('Duration updated:', prev + 1);
+              return prev + 1;
+            });
+          }, 1000);
+        }
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
-        cleanupAndClose();
+        console.log('ICE state indicates call end:', state);
+        if (isInitiator) {
+          endCall(); // Initiator ends the call
+        } else {
+          // Callee waits for call-ended signal
+          console.log('Callee waiting for call-ended signal');
+          // Do not call cleanupAndClose here to avoid resetting duration
+        }
       }
     };
 
@@ -251,7 +262,7 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
 };
 
   const ensureLocalStream = async () => {
-    if (isStarted && localStreamRef.current) {
+    if (localStreamRef.current && isStarted) {
       console.log('Reusing existing local stream');
       return localStreamRef.current;
     }
@@ -266,6 +277,13 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       localStreamRef.current = stream;
       console.log('Local stream acquired:', stream);
       if (localVideoRef.current && callType === 'video') localVideoRef.current.srcObject = stream;
+
+      // Ensure fresh RTCPeerConnection
+      if (pcRef.current) {
+        console.warn('Existing peer connection found; closing it');
+        pcRef.current.close();
+        pcRef.current = null;
+      }
       createPeerAndAttachStream(stream);
       setIsStarted(true);
       setIsConnecting(false);
@@ -274,20 +292,28 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
     } catch (err) {
       setIsConnecting(false);
       console.error('Could not get user media:', err);
-      alert(`Media access error: ${err.message}`);
+      alert(`Media access error: ${err.message}. Please check camera/microphone permissions.`);
       cleanupAndClose();
       throw err;
     }
   };
 
   const sendSignal = (signal) => {
+    if (!receiverId || isNaN(parseInt(receiverId, 10))) {
+      console.error('Invalid receiverId:', receiverId);
+      alert('Cannot send signal: Invalid receiver ID.');
+      cleanupAndClose();
+      return;
+    }
     if (ws && ws.readyState === WebSocket.OPEN) {
-      ws.send(JSON.stringify({
+      const message = {
         type: 'webrtc',
-        sender_id: myId,
+        sender_id: parseInt(myId, 10),
         receiver_id: parseInt(receiverId, 10),
         signal
-      }));
+      };
+      console.log('Sending signal:', signal, 'to receiver_id:', receiverId, 'full message:', message);
+      ws.send(JSON.stringify(message));
     } else {
       console.error('WebSocket not open; cannot send signal:', signal);
       alert('Connection error: Unable to send signal. Please try again.');
@@ -377,12 +403,13 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
   };
 
   const endCall = () => {
-    sendSignal({ type: 'call-ended' });
+    console.log('Ending call with duration:', duration, 'isConnected:', isConnected);
+    sendSignal({ type: 'call-ended', duration: isConnected ? duration : 0 });
     cleanupAndClose();
   };
 
-  const cleanupAndClose = () => {
-    console.log('Cleaning up call resources');
+  const cleanupAndClose = (remoteDuration = 0) => {
+    console.log('Cleaning up call resources with local duration:', duration, 'remote duration:', remoteDuration, 'isConnected:', isConnected);
     if (timerRef.current) {
       console.log('Clearing duration timer');
       clearInterval(timerRef.current);
@@ -425,17 +452,21 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
 
+    // Prioritize remote duration if non-zero, otherwise use local duration if connected
+    const finalDuration = remoteDuration > 0 ? remoteDuration : (isConnected ? duration : 0);
+    console.log('Calling closeCall with duration:', finalDuration);
+
+    // Reset state after calling closeCall
     setIsStarted(false);
     setIsConnected(false);
     setIsConnecting(false);
     setIncomingOffer(null);
     setHasReceivedAnswer(false);
-    setDuration(0);
     setIsMuted(false);
     setIsCameraOn(true);
+    setDuration(0); // Reset after calling closeCall
 
-    console.log('Calling closeCall with duration:', isConnected ? duration : 0);
-    closeCall(isConnected ? duration : 0);
+    closeCall(finalDuration);
   };
 
   useEffect(() => {
