@@ -1,10 +1,11 @@
 import { useState, useEffect, useRef } from 'react';
-import { useParams } from 'react-router-dom';
+import { useNavigate, useParams } from 'react-router-dom';
 import { getMessages, sendMessage } from '../api';
 import Call from './Call';
+import { useCallContext } from '../context/CallContext';
 
 const Chat = () => {
-  const { userId } = useParams(); // this is the "other" user's id (remote)
+  const { userId } = useParams(); // Remote user ID
   const [messages, setMessages] = useState([]);
   const [message, setMessage] = useState('');
   const [showCall, setShowCall] = useState(false);
@@ -22,8 +23,9 @@ const Chat = () => {
   const signalQueueRef = useRef([]);
   const ringtoneRef = useRef(null);
   const ringtoneInputRef = useRef(null);
+  const navigate = useNavigate();
+  const { incomingCall: contextCall, clearCallNotification } = useCallContext();
 
-  // helper to get my id
   const myId = (() => {
     const v = localStorage.getItem('user_id');
     return v ? parseInt(v, 10) : null;
@@ -41,8 +43,9 @@ const Chat = () => {
 
     const attemptWebSocketConnection = () => {
       const token = localStorage.getItem('access_token');
-      // adjust ws URL if needed (wss in prod)
-      ws.current = new WebSocket(`ws://localhost:8000/ws/chat/${userId}/?token=${encodeURIComponent(token)}`);
+      ws.current = new WebSocket(
+        `ws://localhost:8000/ws/chat/${userId}/?token=${encodeURIComponent(token)}`
+      );
 
       ws.current.onopen = () => {
         console.log('✅ WebSocket connected');
@@ -62,28 +65,26 @@ const Chat = () => {
             const signal = data.signal || {};
 
             if (signal.type === 'offer' && sender !== myId) {
-              // Check if already in a call
               if (showCall) {
-                // Send busy signal
                 if (ws.current?.readyState === WebSocket.OPEN) {
-                  ws.current.send(JSON.stringify({
-                    type: 'webrtc',
-                    sender_id: myId,
-                    receiver_id: sender,
-                    signal: { type: 'call-busy' }
-                  }));
+                  ws.current.send(
+                    JSON.stringify({
+                      type: 'webrtc',
+                      sender_id: myId,
+                      receiver_id: sender,
+                      signal: { type: 'call-busy' },
+                    })
+                  );
                 }
                 return;
               }
 
-              // show incoming popup and store who is calling
               setIncomingCall(true);
               setCallerInfo({ sender_id: sender });
-              setIsInitiator(false); // Receiver role
-              setCallType(signal.callType || 'video'); // default to video if not specified
+              setIsInitiator(false);
+              setCallType(signal.callType || 'video');
             }
 
-            // queue or forward to Call component
             if (handleWebRTCSignalRef.current) {
               handleWebRTCSignalRef.current(data);
             } else {
@@ -107,28 +108,39 @@ const Chat = () => {
     fetchMessages();
     attemptWebSocketConnection();
 
+    // Check for incoming call from context (e.g., from UserList notification)
+    if (contextCall && parseInt(contextCall.sender_id, 10) === parseInt(userId, 10)) {
+      setIncomingCall(true);
+      setCallerInfo({ sender_id: contextCall.sender_id });
+      setCallType(contextCall.callType || 'video');
+      setIsInitiator(false);
+      // Push the offer to the signal queue to be processed by Call component
+      signalQueueRef.current.push({
+        type: 'webrtc',
+        sender_id: contextCall.sender_id,
+        signal: contextCall.signal,
+      });
+      clearCallNotification(); // Clear context to prevent re-triggering
+    }
+
     return () => {
       try {
         ws.current?.close();
       } catch (e) {}
       handleWebRTCSignalRef.current = null;
     };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [userId]); // re-open ws when chatting with another user
+  }, [userId, contextCall, clearCallNotification]);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  // Ringtone for incoming call
   useEffect(() => {
     if (incomingCall) {
-      // play ringtone
       ringtoneRef.current = new Audio(ringtoneUrl);
       ringtoneRef.current.loop = true;
       ringtoneRef.current.play().catch(e => console.error('Ringtone play error:', e));
 
-      // Auto-timeout for incoming call
       const timeoutId = setTimeout(() => {
         rejectCall();
         alert('Call timed out');
@@ -148,44 +160,42 @@ const Chat = () => {
     e.preventDefault();
     if (!message.trim()) return;
     try {
-      const response = await sendMessage(userId, message); // send via REST to persist
+      const response = await sendMessage(userId, message);
       const saved = response.data;
 
-      // send through WS so other client receives instantly (also include metadata)
       if (ws.current?.readyState === WebSocket.OPEN) {
-        ws.current.send(JSON.stringify({
-          type: 'chat',
-          sender_id: myId,
-          receiver_id: parseInt(userId, 10),
-          message: saved
-        }));
+        ws.current.send(
+          JSON.stringify({
+            type: 'chat',
+            sender_id: myId,
+            receiver_id: parseInt(userId, 10),
+            message: saved,
+          })
+        );
       }
-      // optimistically render
-      setMessages((prev) => [...prev, saved]);
       setMessage('');
     } catch (error) {
       console.error('Failed to send message:', error);
     }
   };
 
-  // Start call as caller
   const startCallAsCaller = (type) => {
     setCallType(type);
     setIsInitiator(true);
     setShowCall(true);
   };
 
-  // Callee accepts incoming call
   const acceptCall = () => {
     setIncomingCall(false);
-    // Send call-accepted signal before opening Call
     if (ws.current?.readyState === WebSocket.OPEN && callerInfo?.sender_id) {
-      ws.current.send(JSON.stringify({
-        type: 'webrtc',
-        sender_id: myId,
-        receiver_id: parseInt(callerInfo.sender_id, 10),
-        signal: { type: 'call-accepted' }
-      }));
+      ws.current.send(
+        JSON.stringify({
+          type: 'webrtc',
+          sender_id: myId,
+          receiver_id: parseInt(callerInfo.sender_id, 10),
+          signal: { type: 'call-accepted' },
+        })
+      );
     }
     setIsInitiator(false);
     setShowCall(true);
@@ -193,42 +203,36 @@ const Chat = () => {
 
   const rejectCall = () => {
     setIncomingCall(false);
-    // notify caller
     if (ws.current?.readyState === WebSocket.OPEN) {
-      ws.current.send(JSON.stringify({
-        type: 'webrtc',
-        sender_id: myId,
-        receiver_id: callerInfo?.sender_id ? parseInt(callerInfo.sender_id, 10) : parseInt(userId, 10),
-        signal: { type: 'call-rejected' }
-      }));
+      ws.current.send(
+        JSON.stringify({
+          type: 'webrtc',
+          sender_id: myId,
+          receiver_id: callerInfo?.sender_id ? parseInt(callerInfo.sender_id, 10) : parseInt(userId, 10),
+          signal: { type: 'call-rejected' },
+        })
+      );
     }
     setCallerInfo(null);
     setCallType(null);
   };
 
-  // When closing Call component, cleanup state and unregister handler
   const closeCall = (duration = 0) => {
-    console.log("Close CALL======>");
-    
+    console.log('Close CALL======>');
     setShowCall(false);
     setIsInitiator(false);
     setCallerInfo(null);
     setCallType(null);
     handleWebRTCSignalRef.current = null;
-    signalQueueRef.current = []; // Clear signal queue
+    signalQueueRef.current = [];
     if (duration > 0) {
-      console.log('Setting call duration and showing call info:', duration);
       setCallDuration(duration);
       setShowCallInfo(true);
     }
   };
 
-  // compute correct receiverId prop to pass to Call:
-  // - if initiator (caller) -> remote is `userId` from URL
-  // - if callee (accepted incoming) -> remote is the caller's id saved in callerInfo
   const callReceiverId = isInitiator ? userId : (callerInfo?.sender_id?.toString() ?? userId);
 
-  // Format duration as mm:ss
   const formatDuration = (secs) => {
     const mins = Math.floor(secs / 60);
     const seconds = secs % 60;
@@ -251,9 +255,15 @@ const Chat = () => {
       <div className="flex justify-between items-center mb-4">
         <h2 className="text-2xl font-bold">Chat</h2>
         <div className="flex gap-2">
-          <button onClick={() => startCallAsCaller('audio')} className="bg-blue-500 text-white p-2 rounded">Audio Call</button>
-          <button onClick={() => startCallAsCaller('video')} className="bg-green-500 text-white p-2 rounded">Video Call</button>
-          <button onClick={selectRingtone} className="bg-purple-500 text-white p-2 rounded">Select Ringtone</button>
+          <button onClick={() => startCallAsCaller('audio')} className="bg-blue-500 text-white p-2 rounded">
+            Audio Call
+          </button>
+          <button onClick={() => startCallAsCaller('video')} className="bg-green-500 text-white p-2 rounded">
+            Video Call
+          </button>
+          <button onClick={selectRingtone} className="bg-purple-500 text-white p-2 rounded">
+            Select Ringtone
+          </button>
           <input
             type="file"
             accept="audio/*"
@@ -288,30 +298,32 @@ const Chat = () => {
         <button type="submit" className="bg-blue-500 text-white p-2 rounded-r">Send</button>
       </form>
 
-      {/* Incoming call overlay */}
       {incomingCall && (
         <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
           <div className="bg-white p-6 rounded-lg shadow-lg text-center">
-            <h3 className="text-lg font-semibold">Incoming {callType.charAt(0).toUpperCase() + callType.slice(1)} Call</h3>
+            <h3 className="text-lg font-semibold">
+              Incoming {callType.charAt(0).toUpperCase() + callType.slice(1)} Call
+            </h3>
             <p className="my-2">User {callerInfo?.sender_id ?? 'Unknown'} is calling...</p>
             <div className="flex gap-4 justify-center mt-4">
-              <button onClick={acceptCall} className="bg-green-500 text-white px-4 py-2 rounded">Accept</button>
-              <button onClick={rejectCall} className="bg-red-500 text-white px-4 py-2 rounded">Reject</button>
+              <button onClick={acceptCall} className="bg-green-500 text-white px-4 py-2 rounded">
+                Accept
+              </button>
+              <button onClick={rejectCall} className="bg-red-500 text-white px-4 py-2 rounded">
+                Reject
+              </button>
             </div>
           </div>
         </div>
       )}
 
-      {/* Call modal */}
       {showCall && (
         <Call
           receiverId={callReceiverId}
           closeCall={closeCall}
           ws={ws.current}
           setSignalHandler={(fn) => {
-            // register handler (Call will call setSignalHandler(handler) on mount)
             handleWebRTCSignalRef.current = fn;
-            // flush any queued signals
             while (signalQueueRef.current.length > 0) {
               const queuedData = signalQueueRef.current.shift();
               fn(queuedData);
@@ -323,13 +335,14 @@ const Chat = () => {
         />
       )}
 
-      {/* Call info modal */}
       {showCallInfo && (
         <div className="fixed inset-0 flex items-center justify-center bg-black bg-opacity-50 z-50">
           <div className="bg-white p-6 rounded-lg shadow-lg text-center">
             <h3 className="text-lg font-semibold">Call Ended</h3>
             <p className="my-2">Duration: {formatDuration(callDuration)}</p>
-            <button onClick={() => setShowCallInfo(false)} className="bg-blue-500 text-white px-4 py-2 rounded">Close</button>
+            <button onClick={() => setShowCallInfo(false)} className="bg-blue-500 text-white px-4 py-2 rounded">
+              Close
+            </button>
           </div>
         </div>
       )}

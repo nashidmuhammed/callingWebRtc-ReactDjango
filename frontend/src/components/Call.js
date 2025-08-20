@@ -1,4 +1,13 @@
 import { useEffect, useRef, useState } from 'react';
+import {
+  MicrophoneIcon,
+  VideoCameraIcon,
+  VideoCameraSlashIcon,
+  PhoneXMarkIcon,
+  SpeakerWaveIcon,
+  SpeakerXMarkIcon,
+  ArrowsUpDownIcon,
+} from '@heroicons/react/24/solid';
 
 /**
  * Props:
@@ -27,6 +36,8 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
   const [isConnected, setIsConnected] = useState(false);
   const [isMuted, setIsMuted] = useState(false);
   const [isCameraOn, setIsCameraOn] = useState(true);
+  const [isSpeakerOn, setIsSpeakerOn] = useState(true);
+  const [isFrontCamera, setIsFrontCamera] = useState(true);
 
   const rtcConfig = {
     iceServers: [
@@ -35,9 +46,9 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       {
         urls: 'turn:openrelay.metered.ca:80',
         username: 'openrelayproject',
-        credential: 'openrelayproject'
-      }
-    ]
+        credential: 'openrelayproject',
+      },
+    ],
   };
 
   useEffect(() => {
@@ -60,20 +71,15 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
 
       if (data.receiver_id === undefined) {
         console.warn('Received signal with undefined receiver_id:', signal);
-        // Optionally allow processing for critical signals if you can infer the recipient
         if (parseInt(sender, 10) !== parseInt(receiverId, 10)) {
           console.warn('Sender ID does not match expected receiverId; discarding signal');
           return;
         }
-      }else if (parseInt(data.receiver_id, 10) !== myId) {
+      } else if (parseInt(data.receiver_id, 10) !== myId) {
         console.log('Signal not intended for this peer; discarding');
         return;
       }
-      // Check if the signal is intended for this peer
-      // if (data.receiver_id && parseInt(data.receiver_id, 10) !== myId) {
-      //   console.log('Signal not intended for this peer; discarding');
-      //   // return;
-      // }
+
       if (signal.type === 'offer') {
         console.log('Call: incoming offer received');
         setIncomingOffer(signal);
@@ -129,14 +135,12 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
 
       if (signal.type === 'call-accepted') {
         console.log('Call: call-accepted received');
-        console.log('isInitiator===>',isInitiator);
-        
         if (isInitiator) {
           if (!pcRef.current) {
             console.warn('No peer connection; initializing');
-            await ensureLocalStream(); // Initialize peer connection if not already done
+            await ensureLocalStream();
           }
-          setIsStarted(true); // Update state to show "Connecting" in UI
+          setIsStarted(true);
           if (timeoutRef.current) {
             clearTimeout(timeoutRef.current);
             timeoutRef.current = setTimeout(() => {
@@ -158,8 +162,7 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       if (signal.type === 'call-ended') {
         console.log('Ending call with duration:', duration);
         alert('Call ended by remote user');
-        // cleanupAndClose();
-        cleanupAndClose(signal.duration || 0); // Pass remote duration as fallback
+        cleanupAndClose(signal.duration || 0);
         return;
       }
       if (signal.type === 'call-busy') {
@@ -173,14 +176,14 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
 
     return () => {
       setSignalHandler(() => null);
-      candidateQueueRef.current = []; // Clear candidate queue on unmount
+      candidateQueueRef.current = [];
     };
   }, [setSignalHandler, myId, receiverId, isInitiator, hasReceivedAnswer, isConnected]);
 
   const createPeerAndAttachStream = (localStream) => {
     if (pcRef.current) {
       console.warn('Existing peer connection found; closing it before creating new one');
-      pcRef.current.close();
+      pcRef.current.close(); // Fixed: Added semicolon
     }
     console.log('Creating new RTCPeerConnection');
     pcRef.current = new RTCPeerConnection(rtcConfig);
@@ -211,55 +214,39 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
         if (!timerRef.current) {
           console.log('Starting duration timer');
           timerRef.current = setInterval(() => {
-            setDuration((prev) => {
-              // console.log('Duration updated:', prev + 1);
-              return prev + 1;
-            });
+            setDuration((prev) => prev + 1);
           }, 1000);
         }
       } else if (state === 'disconnected' || state === 'failed' || state === 'closed') {
         console.log('ICE state indicates call end:', state);
         if (isInitiator) {
-          endCall(); // Initiator ends the call
+          endCall();
         } else {
-          // Callee waits for call-ended signal
           console.log('Callee waiting for call-ended signal');
-          // Do not call cleanupAndClose here to avoid resetting duration
         }
       }
     };
-
-    // if (candidateQueueRef.current.length > 0) {
-    //   candidateQueueRef.current.forEach(async (cand) => {
-    //     try {
-    //       await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
-    //     } catch (e) {
-    //       console.warn('Failed to add queued ICE:', e);
-    //     }
-    //   });
-    //   candidateQueueRef.current = [];
-    // }
   };
 
   const processQueuedCandidates = async () => {
-  if (candidateQueueRef.current.length > 0 && pcRef.current) {
-    const validStates = ['stable', 'have-remote-offer', 'have-local-offer'];
-    if (!validStates.includes(pcRef.current.signalingState)) {
-      console.warn('Cannot process ICE candidates; invalid signaling state:', pcRef.current.signalingState);
-      return;
-    }
-    console.log('Processing queued ICE candidates');
-    for (const cand of candidateQueueRef.current) {
-      try {
-        await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
-        console.log('Added queued ICE candidate:', cand);
-      } catch (e) {
-        console.warn('Failed to add queued ICE candidate:', e);
+    if (candidateQueueRef.current.length > 0 && pcRef.current) {
+      const validStates = ['stable', 'have-remote-offer', 'have-local-offer'];
+      if (!validStates.includes(pcRef.current.signalingState)) {
+        console.warn('Cannot process ICE candidates; invalid signaling state:', pcRef.current.signalingState);
+        return;
       }
+      console.log('Processing queued ICE candidates');
+      for (const cand of candidateQueueRef.current) {
+        try {
+          await pcRef.current.addIceCandidate(new RTCIceCandidate(cand));
+          console.log('Added queued ICE candidate:', cand);
+        } catch (e) {
+          console.warn('Failed to add queued ICE candidate:', e);
+        }
+      }
+      candidateQueueRef.current = [];
     }
-    candidateQueueRef.current = []; // Clear the queue after processing
-  }
-};
+  };
 
   const ensureLocalStream = async () => {
     if (localStreamRef.current && isStarted) {
@@ -268,7 +255,7 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
     }
     try {
       setIsConnecting(true);
-      const videoOpts = callType === 'video' ? { width: 1280, height: 720 } : false;
+      const videoOpts = callType === 'video' ? { width: 1280, height: 720, facingMode: isFrontCamera ? 'user' : 'environment' } : false;
       const opts = { video: videoOpts, audio: true };
       console.log('Requesting media devices with opts:', opts);
       const stream = await navigator.mediaDevices.getUserMedia(opts).catch((err) => {
@@ -278,7 +265,6 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       console.log('Local stream acquired:', stream);
       if (localVideoRef.current && callType === 'video') localVideoRef.current.srcObject = stream;
 
-      // Ensure fresh RTCPeerConnection
       if (pcRef.current) {
         console.warn('Existing peer connection found; closing it');
         pcRef.current.close();
@@ -310,7 +296,7 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
         type: 'webrtc',
         sender_id: parseInt(myId, 10),
         receiver_id: parseInt(receiverId, 10),
-        signal
+        signal,
       };
       console.log('Sending signal:', signal, 'to receiver_id:', receiverId, 'full message:', message);
       ws.send(JSON.stringify(message));
@@ -327,7 +313,7 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       hasPeerConnection: !!pcRef.current,
       hasLocalStream: !!localStreamRef.current,
       receiverId,
-      isInitiator
+      isInitiator,
     });
     try {
       await ensureLocalStream();
@@ -342,7 +328,7 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       await pcRef.current.setLocalDescription(offer);
       console.log('Sending offer signal');
       sendSignal({ ...offer, callType });
-      setIsStarted(true); // Ensure UI reflects "Calling..."
+      setIsStarted(true);
       timeoutRef.current = setTimeout(() => {
         if (!hasReceivedAnswer) {
           alert('Call timed out - no answer');
@@ -365,12 +351,12 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       await ensureLocalStream();
       if (!pcRef.current) {
         console.warn('No peer connection; creating new one');
-        await ensureLocalStream(); // Ensure peer connection is created
+        await ensureLocalStream();
       }
       console.log('Setting remote description for offer');
       await pcRef.current.setRemoteDescription(new RTCSessionDescription(incomingOffer));
       console.log('Remote description set successfully');
-      await processQueuedCandidates(); // Process queued candidates after setting remote description
+      await processQueuedCandidates();
       const answer = await pcRef.current.createAnswer();
       await pcRef.current.setLocalDescription(answer);
       sendSignal(answer);
@@ -398,6 +384,36 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
       if (videoTrack) {
         videoTrack.enabled = !videoTrack.enabled;
         setIsCameraOn(videoTrack.enabled);
+      }
+    }
+  };
+
+  const toggleSpeaker = () => {
+    setIsSpeakerOn(!isSpeakerOn);
+    // Note: Speaker toggle is not natively supported in WebRTC; this is a placeholder
+  };
+
+  const switchCamera = async () => {
+    if (localStreamRef.current && callType === 'video') {
+      try {
+        setIsConnecting(true);
+        localStreamRef.current.getVideoTracks().forEach((track) => track.stop());
+        const newStream = await navigator.mediaDevices.getUserMedia({
+          video: { width: 1280, height: 720, facingMode: isFrontCamera ? 'environment' : 'user' },
+          audio: true,
+        });
+        localStreamRef.current = newStream;
+        if (localVideoRef.current) localVideoRef.current.srcObject = newStream;
+        const videoTrack = newStream.getVideoTracks()[0];
+        const sender = pcRef.current.getSenders().find((s) => s.track?.kind === 'video');
+        if (sender) sender.replaceTrack(videoTrack);
+        setIsFrontCamera(!isFrontCamera);
+        setIsCameraOn(true);
+        setIsConnecting(false);
+      } catch (err) {
+        console.error('Failed to switch camera:', err);
+        alert('Failed to switch camera. Please check permissions.');
+        setIsConnecting(false);
       }
     }
   };
@@ -452,11 +468,9 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
     if (localVideoRef.current) localVideoRef.current.srcObject = null;
     if (remoteVideoRef.current) remoteVideoRef.current.srcObject = null;
 
-    // Prioritize remote duration if non-zero, otherwise use local duration if connected
     const finalDuration = remoteDuration > 0 ? remoteDuration : (isConnected ? duration : 0);
     console.log('Calling closeCall with duration:', finalDuration);
 
-    // Reset state after calling closeCall
     setIsStarted(false);
     setIsConnected(false);
     setIsConnecting(false);
@@ -464,7 +478,9 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
     setHasReceivedAnswer(false);
     setIsMuted(false);
     setIsCameraOn(true);
-    setDuration(0); // Reset after calling closeCall
+    setIsSpeakerOn(true);
+    setIsFrontCamera(true);
+    setDuration(0);
 
     closeCall(finalDuration);
   };
@@ -483,47 +499,94 @@ const Call = ({ receiverId, closeCall, ws, setSignalHandler, isInitiator, myId, 
   };
 
   return (
-    <div className="fixed inset-0 bg-black bg-opacity-75 flex items-center justify-center z-50">
-      <div className="bg-white p-4 rounded shadow-lg w-[700px] max-w-full">
-        <div className="grid grid-cols-2 gap-4">
-          <div className="flex flex-col items-center">
-            <h4 className="mb-2">You</h4>
-            {callType === 'video' ? (
-              <video ref={localVideoRef} autoPlay muted playsInline className="bg-black w-full h-56 object-cover" />
-            ) : (
-              <div className="bg-black w-full h-56 flex items-center justify-center text-white">Audio Only</div>
-            )}
+    <div className="fixed inset-0 bg-gray-900 flex flex-col items-center justify-center z-50">
+      {callType === 'video' ? (
+        <>
+          <video
+            ref={remoteVideoRef}
+            autoPlay
+            playsInline
+            className="absolute inset-0 w-full h-full object-cover"
+          />
+          <video
+            ref={localVideoRef}
+            autoPlay
+            muted
+            playsInline
+            className={`absolute bottom-4 right-4 w-32 h-24 bg-black rounded-lg shadow-lg border-2 border-white ${
+              isCameraOn ? '' : 'hidden'
+            }`}
+          />
+        </>
+      ) : (
+        <div className="flex flex-col items-center justify-center h-full">
+          <div className="w-24 h-24 rounded-full bg-gray-700 flex items-center justify-center text-white text-2xl font-bold">
+            {receiverId ? receiverId.charAt(0).toUpperCase() : '?'}
           </div>
-          <div className="flex flex-col items-center">
-            <h4 className="mb-2">Remote</h4>
-            <video ref={remoteVideoRef} autoPlay playsInline className="bg-black w-full h-56 object-cover" />
-          </div>
+          <h2 className="mt-4 text-2xl font-semibold text-white">User {receiverId}</h2>
         </div>
+      )}
 
-        <div className="flex justify-between mt-4">
-          <div className="flex gap-2">
-            <button onClick={toggleMute} className="bg-gray-500 text-white px-4 py-2 rounded">
-              {isMuted ? 'Unmute' : 'Mute'}
+      <div className="absolute top-4 left-4 text-white text-lg">
+        {isConnecting ? (
+          'Connecting...'
+        ) : isConnected ? (
+          <span>Connected - {formatDuration(duration)}</span>
+        ) : isStarted ? (
+          'Calling...'
+        ) : incomingOffer ? (
+          'Incoming call'
+        ) : (
+          'Idle'
+        )}
+      </div>
+
+      <div className="absolute bottom-8 flex justify-center gap-6">
+        <button
+          onClick={toggleMute}
+          className={`w-12 h-12 rounded-full flex items-center justify-center ${
+            isMuted ? 'bg-red-500' : 'bg-gray-700'
+          } text-white shadow-lg hover:bg-gray-600 transition`}
+          title={isMuted ? 'Unmute' : 'Mute'}
+        >
+          {isMuted ? <MicrophoneIcon className="w-6 h-6" /> : <MicrophoneIcon className="w-6 h-6" />}
+        </button>
+        {callType === 'video' && (
+          <>
+            <button
+              onClick={toggleCamera}
+              className={`w-12 h-12 rounded-full flex items-center justify-center ${
+                isCameraOn ? 'bg-gray-700' : 'bg-red-500'
+              } text-white shadow-lg hover:bg-gray-600 transition`}
+              title={isCameraOn ? 'Turn Camera Off' : 'Turn Camera On'}
+            >
+              {isCameraOn ? <VideoCameraIcon className="w-6 h-6" /> : <VideoCameraSlashIcon className="w-6 h-6" />}
             </button>
-            {callType === 'video' && (
-              <button onClick={toggleCamera} className="bg-gray-500 text-white px-4 py-2 rounded">
-                {isCameraOn ? 'Camera Off' : 'Camera On'}
-              </button>
-            )}
-            <button onClick={endCall} className="bg-red-600 text-white px-4 py-2 rounded">End</button>
-          </div>
-
-          {/* <div className="text-sm text-gray-600 self-center">
-            {isStarted ? (isConnected ? `Connected - ${formatDuration(duration)}` : 'Connecting...') : incomingOffer ? 'Incoming call' : isInitiator ? 'Calling...' : 'Idle'}
-          </div> */}
-          <div className="text-sm text-gray-600 self-center">
-            {isConnecting ? 'Connecting...' :
-            isConnected ? `Connected - ${formatDuration(duration)}` :
-            isStarted ? 'Calling...' :
-            incomingOffer ? 'Incoming call' :
-            'Idle'}
-          </div>
-        </div>
+            <button
+              onClick={switchCamera}
+              className="w-12 h-12 rounded-full bg-gray-700 flex items-center justify-center text-white shadow-lg hover:bg-gray-600 transition"
+              title="Switch Camera"
+            >
+              <ArrowsUpDownIcon className="w-6 h-6" />
+            </button>
+          </>
+        )}
+        <button
+          onClick={toggleSpeaker}
+          className={`w-12 h-12 rounded-full flex items-center justify-center ${
+            isSpeakerOn ? 'bg-gray-700' : 'bg-red-500'
+          } text-white shadow-lg hover:bg-gray-600 transition`}
+          title={isSpeakerOn ? 'Turn Speaker Off' : 'Turn Speaker On'}
+        >
+          {isSpeakerOn ? <SpeakerWaveIcon className="w-6 h-6" /> : <SpeakerXMarkIcon className="w-6 h-6" />}
+        </button>
+        <button
+          onClick={endCall}
+          className="w-12 h-12 rounded-full bg-red-600 flex items-center justify-center text-white shadow-lg hover:bg-red-700 transition"
+          title="End Call"
+        >
+          <PhoneXMarkIcon className="w-6 h-6" />
+        </button>
       </div>
     </div>
   );
